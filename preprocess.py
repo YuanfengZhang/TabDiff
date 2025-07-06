@@ -36,7 +36,7 @@ DESCRIPTION: str = (
     '              This param can be specified multiple times\n'
     '  --remove-original-cat-col specify if the original categorical columns should be removed after merging\n'
     '  --split-props <train_ratio,valid_ratio,test_ratio>\n'
-    '                three int / float values with a sum of 100.0, such as "45,45,10"\n')
+    '                three int / float values with a sum of 100.0, such as "45,35,20"\n')
 
 
 def check_split_props(string: str) -> list[float]:
@@ -45,7 +45,7 @@ def check_split_props(string: str) -> list[float]:
     and that they sum to 100.0.
     """
     parts = list(map(float, string.split(',')))
-    if len(parts) != 2:
+    if len(parts) != 3:
         raise ArgumentTypeError('split-props must contain three values.')
     if not (abs(sum(parts) - 100.0) < 1e-6):
         raise ArgumentTypeError('split-props must sum to 100.')
@@ -103,19 +103,19 @@ def get_column_name_mapping(column_list: list[str],
                             target_col: str):
     name_to_idx = {name: idx for idx, name in enumerate(column_list)}
 
-    # 获取各组列的索引
+    # Get the index of columns in each group 获取各组列的索引
     num_col_idx = [name_to_idx[col] for col in numeric_cols]
     cat_col_idx = [name_to_idx[col] for col in categorical_cols]
     target_col_idx = [name_to_idx[target_col]]
 
-    # 创建新索引的起始位置
+    # Create new start index for groups 创建新索引的起始位置
     starts = {
         'num': 0,
         'cat': len(num_col_idx),
         'target': len(num_col_idx) + len(cat_col_idx)
     }
 
-    # 构建索引映射
+    # create mapping dict 构建索引映射
     idx_mapping = {}
     for col_idx in range(len(column_list)):
         if col_idx in num_col_idx:
@@ -124,15 +124,15 @@ def get_column_name_mapping(column_list: list[str],
         elif col_idx in cat_col_idx:
             new_idx = starts['cat']
             starts['cat'] += 1
-        else:  # 目标列
+        else:  # target col 目标列
             new_idx = starts['target']
             starts['target'] += 1
         idx_mapping[int(col_idx)] = int(new_idx)
 
-    # 构建反向映射
+    # rev mapping 构建反向映射
     inverse_idx_mapping = {v: k for k, v in idx_mapping.items()}
 
-    # 构建索引到列名的映射
+    # idx -> name 构建索引到列名的映射
     idx_name_mapping = {int(i): name for i, name in enumerate(column_list)}
 
     return idx_mapping, inverse_idx_mapping, idx_name_mapping
@@ -166,8 +166,9 @@ def main():
     arg_parser.add_argument('--remove-original-cat-col', dest='rm_cat', action='store_true',
                             help='Remove original categorical columns after merging.')
 
-    arg_parser.add_argument('--split-props', type=check_split_props, default=[.8, .2],
-                            help='Train, and test split proportions, like "80,20" Three numbers summing to 100.')
+    arg_parser.add_argument('--split-props', type=check_split_props, default=[.8, .1, .1],
+                            help='Train, and test split proportions.'
+                                 'Three numbers summing to 100. E.g.: "80,10,10".')
 
     args: Namespace = arg_parser.parse_args()
 
@@ -193,7 +194,7 @@ def main():
     output_dir: Path = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info('Output Directory created: %s', output_dir)
+    logger.info(f'Output Directory created: {output_dir}')
 
     cat_merge_columns: dict[str, list[str]] = parse_cat_merge_list(args.cat_merge_list)
 
@@ -229,6 +230,8 @@ def main():
                 input_df.drop(columns=original_cols, inplace=True)
             logger.info(f'Merged columns {original_cols} into {merged_col}')
 
+    # Confirm all the dtypes.
+    # Numeric columns with only two unique values will also be treated as categorical columns.
     # 确认所有列的数据类型, 仅有2个独特值的数值列也被视为分类列
     categorical_cols: list[str] = []
     numeric_cols: list[str] = []
@@ -261,43 +264,85 @@ def main():
             integer_cols.append(col_name)
             int_col_idx_wrt_num.append(i)
 
+    # Fillna for categorical columns
     # 填充分类列的空值
     for col in categorical_cols:
         input_df[col].fillna('empty', inplace=True)
+    # Delete rows where any numeric column is NA.
     # 删除数值列为空的行
     input_df.dropna(subset=numeric_cols, inplace=True)
     input_df.reset_index(drop=True, inplace=True)
 
-    # 将数据集分割成训练集、验证集和测试集
+    # Split dataset to train, validate and test parts.
+    # 将数据集分割成训练集测试集
     logger.info('Splitting the DataFrame into train, validation, and test sets.')
 
-    X_df: pd.DataFrame
     y_df: pd.DataFrame
     X_train: pd.DataFrame
     X_test: pd.DataFrame
+    X_validate: pd.DataFrame
     y_train: pd.DataFrame
     y_test: pd.DataFrame
+    y_validate: pd.DataFrame
 
     y_df = input_df[[args.target_col]].copy(deep=True)
     # X_df = input_df.drop(columns=[args.target_col])
     (X_train, X_test,
      y_train, y_test) = train_test_split(input_df, y_df, random_state=28,
-                                         test_size=args.split_props[1])
-    # 分离分类列和数值列
-    np.save(output_dir / 'X_cat_train.npy', X_train[categorical_cols].to_numpy())
-    np.save(output_dir / 'X_num_train.npy',
-            X_train[numeric_cols].to_numpy().astype(np.float32))
+                                         test_size=args.split_props[2])
+
+    val_path: str
+    train_num: int
+    val_num: int
+
+    if args.split_props[1] > .0:
+        # separate again if validation dataset prop exists.
+        X_train2: pd.DataFrame
+        y_train2: pd.DataFrame
+        X_validate: pd.DataFrame
+        X_validate: pd.DataFrame
+        (X_train2, X_validate,
+         y_train2, y_validate) = train_test_split(X_train, y_train, random_state=28,
+                                                  test_size=(args.split_props[1] / sum(args.split_props[: 2])))
+        # Separate the categorical and numeric columns.
+        # I don't know why but basically follow the instructions from authors.
+        # 分离分类列和数值列
+        X_train2.to_csv(output_dir / 'train.csv', index=False)
+        np.save(output_dir / 'X_cat_train.npy', X_train2[categorical_cols].to_numpy())
+        np.save(output_dir / 'X_num_train.npy',
+                X_train2[numeric_cols].to_numpy().astype(np.float32))
+        X_validate.to_csv(output_dir / 'val.csv', index=False)
+        np.save(output_dir / 'X_cat_val.npy', X_validate[categorical_cols].to_numpy())
+        np.save(output_dir / 'X_num_val.npy',
+                X_validate[numeric_cols].to_numpy().astype(np.float32))
+
+        np.save(output_dir / 'y_train.npy', y_train2)
+        np.save(output_dir / 'y_val.npy', y_validate)
+
+        val_path = (output_dir / 'val.csv').as_posix()
+        train_num = y_train2.shape[0]
+        val_num = y_validate.shape[0]
+
+    else:
+        X_train.to_csv(output_dir / 'train.csv', index=False)
+        np.save(output_dir / 'X_cat_train.npy', X_train[categorical_cols].to_numpy())
+        np.save(output_dir / 'X_num_train.npy',
+                X_train[numeric_cols].to_numpy().astype(np.float32))
+        np.save(output_dir / 'y_train.npy', y_train)
+
+        val_path = 'null'
+        train_num = y_train.shape[0]
+        val_num = 0
+
+    # save test part and whole df
+    X_test.to_csv(output_dir / 'test.csv', index=False)
     np.save(output_dir / 'X_cat_test.npy', X_test[categorical_cols].to_numpy())
     np.save(output_dir / 'X_num_test.npy',
             X_test[numeric_cols].to_numpy().astype(np.float32))
-    np.save(output_dir / 'y_train.npy', y_train)
     np.save(output_dir / 'y_test.npy', y_test)
-
     input_df.to_csv(output_dir / f'{args.run_name}.csv', index=False)
-    X_train.to_csv(output_dir / 'train.csv', index=False)
-    X_test.to_csv(output_dir / 'test.csv', index=False)
 
-    # TODO: generate info.json
+    # generate info.json
     final_columns: list[str] = input_df.columns.to_list()
     (column_info,
      metadata) = get_column_info(df=input_df,
@@ -320,17 +365,16 @@ def main():
                         if c in final_columns],
         'target_col_idx': [final_columns.index(args.target_col)],
         'file_type': 'csv',
-        'test_path': 'null',
-        'val_path': 'null',
-        'data_path': (output_dir / f'{args.run_name}.csv').as_posix(),
-        'int_col_idx': [final_columns.index(c) for c in integer_cols
-                       if c in final_columns],
+        'test_path': (output_dir / 'test.csv').as_posix(),  # X_test
+        'val_path': val_path,  # X_validate
+        'data_path': (output_dir / 'train.csv').as_posix(),  # X_train
+        'int_col_idx': [final_columns.index(c) for c in integer_cols if c in final_columns],
         'int_columns': integer_cols,
         'int_col_idx_wrt_num': int_col_idx_wrt_num,
         'column_info': column_info,
-        'train_num': y_train.shape[0],
+        'train_num': train_num,
         'test_num': y_test.shape[0],
-        'val_num': 0,
+        'val_num': val_num,
         'idx_mapping': idx_mapping,
         'inverse_idx_mapping': rev_idx_mapping,
         'idx_name_mapping': idx_name_mapping,
@@ -343,4 +387,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

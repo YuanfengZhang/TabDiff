@@ -322,7 +322,7 @@ def main():
         'file_type': 'csv',
         'test_path': 'null',
         'val_path': 'null',
-        'data_path': (output_dir / 'input.csv').as_posix(),
+        'data_path': (output_dir / f'{args.run_name}.csv').as_posix(),
         'int_col_idx': [final_columns.index(c) for c in integer_cols
                        if c in final_columns],
         'int_columns': integer_cols,
